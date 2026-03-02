@@ -65,13 +65,13 @@ function addTask(title, meetingName) {
   try {
     const timeZone   = Session.getScriptTimeZone();
     const now        = new Date();
-    const localDay   = Utilities.formatDate(now, timeZone, 'EEEE'); // e.g. 'Friday'
+    const dayOfWeek  = parseInt(Utilities.formatDate(now, timeZone, 'u'), 10); // 1=Mon … 7=Sun
 
     // Skip weekends: tasks from Fri/Sat/Sun are all due the following Monday
-    const daysToAdd = (localDay === 'Friday')   ? 3
-                    : (localDay === 'Saturday')  ? 2
-                    : (localDay === 'Sunday')    ? 1
-                    :                             1; // Mon–Thu → due tomorrow
+    const daysToAdd = (dayOfWeek === 5) ? 3   // Friday
+                    : (dayOfWeek === 6) ? 2   // Saturday
+                    : (dayOfWeek === 7) ? 1   // Sunday
+                    :                     1;  // Mon–Thu → due tomorrow
 
     const dueDate    = new Date(now.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
     const dueDateStr = Utilities.formatDate(dueDate, timeZone, 'yyyy-MM-dd');
