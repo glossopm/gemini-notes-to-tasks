@@ -11,6 +11,11 @@ const LOOKBACK_DAYS = '1d';                 // Only scan emails from the last 24
 // MAIN FUNCTION — run this on a time-based trigger (e.g. every hour)
 // ---------------------------------------------------------------------------
 function processMeetingNotes() {
+  if (!YOUR_NAME || !TASK_LIST_ID || !GOOGLE_CHAT_WEBHOOK_URL) {
+    console.error('Missing required Script Properties. Run setupEnvironment() first (MY_NAME, TASK_LIST_ID, CHAT_WEBHOOK).');
+    return;
+  }
+
   const query = `in:inbox subject:Notes "Suggested next steps" -label:${LABEL_NAME} newer_than:${LOOKBACK_DAYS}`;
   const threads = GmailApp.search(query, 0, 10);
 
@@ -23,11 +28,24 @@ function processMeetingNotes() {
   const summaryForChat = [];
 
   threads.forEach(thread => {
-    const lastMsg = thread.getMessages().pop();
-    const body    = lastMsg.getPlainBody();
-    const subject = lastMsg.getSubject();
+    const messages = thread.getMessages();
+    let targetMsg = null;
+    let body = '';
 
-    if (!body.includes('Suggested next steps')) return;
+    // Find the newest message in the thread that contains "Suggested next steps"
+    // (Gmail searches threads, so a reply/forward may be the newest but lack the section)
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const candidateBody = messages[i].getPlainBody();
+      if (candidateBody && candidateBody.includes('Suggested next steps')) {
+        targetMsg = messages[i];
+        body = candidateBody;
+        break;
+      }
+    }
+
+    if (!targetMsg) return;
+
+    const subject = targetMsg.getSubject();
 
     // Extract only the action-items section (between the two known headings)
     const afterSteps = body.split('Suggested next steps')[1];
@@ -118,14 +136,28 @@ function listTaskLists() {
 }
 
 // Step 2 — Store your personal settings as Script Properties
-//           Edit the values below, then run this function once
+//           Edit the values below, then run this function once.
+//           Re-running this function will only fill in keys that are not yet set.
 function setupEnvironment() {
-  PropertiesService.getScriptProperties().setProperties({
+  const props    = PropertiesService.getScriptProperties();
+  const existing = props.getProperties();
+  const defaults = {
     'MY_NAME'      : 'Your Name',             // As it appears in meeting notes
     'TASK_LIST_ID' : '@default',              // Or paste the ID from listTaskLists()
     'CHAT_WEBHOOK' : 'https://chat.googleapis.com/v1/spaces/SPACE_ID/messages?key=...'
-  });
-  console.log('Script Properties saved. Run listTaskLists() to find your Task List ID.');
+  };
+
+  // Only write keys that are not already set, so existing config is never overwritten
+  const missing = Object.fromEntries(
+    Object.entries(defaults).filter(([key]) => !existing[key])
+  );
+
+  if (Object.keys(missing).length > 0) {
+    props.setProperties(missing);
+    console.log('Script Properties initialized: ' + Object.keys(missing).join(', '));
+  } else {
+    console.log('All Script Properties already set — no changes made.');
+  }
 }
 
 // Step 3 — Create the hourly trigger automatically (run once; removes any existing trigger first)
@@ -143,7 +175,7 @@ function setupTrigger() {
   console.log('Hourly trigger created for processMeetingNotes.');
 }
 
-// Run all three setup steps at once (listTaskLists output will help you fill in TASK_LIST_ID)
+// Runs all setup steps at once. Safe to rerun — existing Script Properties are never overwritten.
 function firstTimeSetup() {
   setupEnvironment();
   setupTrigger();
