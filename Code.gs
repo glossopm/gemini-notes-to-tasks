@@ -1,121 +1,151 @@
 // --- GLOBAL CONFIGURATION ---
-const scriptProperties = PropertiesService.getScriptProperties();
+// Values are stored in Project Settings > Script Properties (never hardcoded here)
+const YOUR_NAME               = PropertiesService.getScriptProperties().getProperty('MY_NAME');
+const TASK_LIST_ID            = PropertiesService.getScriptProperties().getProperty('TASK_LIST_ID');
+const GOOGLE_CHAT_WEBHOOK_URL = PropertiesService.getScriptProperties().getProperty('CHAT_WEBHOOK');
 
-const YOUR_NAME               = scriptProperties.getProperty('MY_NAME');      // Your name as it appears in notes (common names may struggle)
-const TASK_LIST_ID            = scriptProperties.getProperty('TASK_LIST_ID');    // Replace with your long ID from listTaskLists()
-const GOOGLE_CHAT_WEBHOOK_URL = scriptProperties.getProperty('CHAT_WEBHOOK');
-const LABEL_NAME   = "Processed_to_Tasks";      // Label to prevent duplicates
-const LOOKBACK_DAYS = "1d";                     // Only check the last 24 hours
+const LABEL_NAME    = 'Processed_to_Tasks'; // Gmail label used to prevent reprocessing
+const LOOKBACK_DAYS = '1d';                 // Only scan emails from the last 24 hours
 
+// ---------------------------------------------------------------------------
+// MAIN FUNCTION — run this on a time-based trigger (e.g. every hour)
+// ---------------------------------------------------------------------------
 function processMeetingNotes() {
-  // The query now uses the global variables
-  const query = 'in:inbox subject:Notes "Suggested next steps" -label:' + LABEL_NAME + ' newer_than:' + LOOKBACK_DAYS;
+  const query = `in:inbox subject:Notes "Suggested next steps" -label:${LABEL_NAME} newer_than:${LOOKBACK_DAYS}`;
   const threads = GmailApp.search(query, 0, 10);
-  
+
   if (threads.length === 0) {
-    console.log("No new notes found for " + YOUR_NAME);
+    console.log('No new meeting notes found for ' + YOUR_NAME);
     return;
   }
-  let summaryForChat = []; // Initialize this at the top of the function
-  let label = GmailApp.getUserLabelByName(LABEL_NAME) || GmailApp.createLabel(LABEL_NAME);
+
+  const label = GmailApp.getUserLabelByName(LABEL_NAME) || GmailApp.createLabel(LABEL_NAME);
+  const summaryForChat = [];
 
   threads.forEach(thread => {
     const lastMsg = thread.getMessages().pop();
-    const body = lastMsg.getPlainBody();
+    const body    = lastMsg.getPlainBody();
     const subject = lastMsg.getSubject();
 
-    if (body.includes("Suggested next steps")) {
-      const afterSteps = body.split("Suggested next steps")[1];
-      const section = afterSteps.includes("Meeting records") ? afterSteps.split("Meeting records")[0] : afterSteps;
-      const blocks = section.split(/\n\s*\n/);
-      
-      blocks.forEach(block => {
-        let cleanTask = block.replace(/\r?\n|\r/g, " ").trim();
-        cleanTask = cleanTask.replace(/^[\s\-\*\[\]]+/, "").replace("  ", " ");
+    if (!body.includes('Suggested next steps')) return;
 
-        if (cleanTask.includes(YOUR_NAME)) {
-          let meetingName = subject.match(/'([^']+)'/)?.[1] || subject;
-          addTask(cleanTask, meetingName);
-          summaryForChat.push(`• ${cleanTask}: *${meetingName}*`);
-        }
-      });
-      thread.addLabel(label);
-    }
+    // Extract only the action-items section (between the two known headings)
+    const afterSteps = body.split('Suggested next steps')[1];
+    const section    = afterSteps.includes('Meeting records')
+      ? afterSteps.split('Meeting records')[0]
+      : afterSteps;
+
+    // Each paragraph-separated block is one action item
+    section.split(/\n\s*\n/).forEach(block => {
+      // Collapse line breaks and strip leading bullets / whitespace
+      let task = block.replace(/\r?\n|\r/g, ' ').trim();
+      task = task.replace(/^[\s\-*\[\]]+/, '').replace(/  +/g, ' ');
+
+      if (task && task.includes(YOUR_NAME)) {
+        // Pull the meeting name from between single quotes in the subject, or use the full subject
+        const meetingName = subject.match(/'([^']+)'/)?.[1] || subject;
+        addTask(task, meetingName);
+        summaryForChat.push(`• ${task}: *${meetingName}*`);
+      }
+    });
+
+    thread.addLabel(label);
   });
-  
+
   if (summaryForChat.length > 0) {
     sendGoogleChatNotification(summaryForChat);
   }
 }
 
+// ---------------------------------------------------------------------------
+// Create a Google Task with a weekend-aware due date
+// Due dates are calculated in the script owner's timezone (from account settings)
+// ---------------------------------------------------------------------------
 function addTask(title, meetingName) {
   try {
-    const today = new Date();
-    const dayOfWeek = today.getDay(); // 0=Sun, 1=Mon, ..., 5=Fri, 6=Sat
-    let daysToAdd;
+    const timeZone   = Session.getScriptTimeZone();
+    const now        = new Date();
+    const localDay   = Utilities.formatDate(now, timeZone, 'EEEE'); // e.g. 'Friday'
 
-    // Determine the next available Monday or Next Day
-    if (dayOfWeek === 5) {         // It's Friday -> Move to Monday (+3)
-      daysToAdd = 3;
-    } else if (dayOfWeek === 6) {  // It's Saturday -> Move to Monday (+2)
-      daysToAdd = 2;
-    } else {                       // Sun-Thu -> Move to Tomorrow (+1)
-      daysToAdd = 1;
-    }
+    // Skip weekends: tasks from Fri/Sat/Sun are all due the following Monday
+    const daysToAdd = (localDay === 'Friday')   ? 3
+                    : (localDay === 'Saturday')  ? 2
+                    : (localDay === 'Sunday')    ? 1
+                    :                             1; // Mon–Thu → due tomorrow
 
-    const dueDate = new Date();
-    dueDate.setDate(today.getDate() + daysToAdd);
-    
-    // Format for Google Tasks "All Day"
-    const dateStr = dueDate.toISOString().split('T')[0] + "T00:00:00.000Z";
+    const dueDate    = new Date(now.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
+    const dueDateStr = Utilities.formatDate(dueDate, timeZone, 'yyyy-MM-dd');
 
-    const task = {
-      title: title,
-      notes: "From: " + meetingName,
-      due: dateStr
-    };
-    
-    Tasks.Tasks.insert(task, TASK_LIST_ID); 
-    console.log(`Task scheduled for ${dueDate.toDateString()}`);
+    Tasks.Tasks.insert(
+      { title, notes: 'From meeting: ' + meetingName, due: dueDateStr + 'T00:00:00.000Z' },
+      TASK_LIST_ID
+    );
+
+    console.log(`Task "${title}" scheduled for ${dueDateStr} (${timeZone})`);
   } catch (e) {
-    console.log("Error in addTask: " + e.toString());
+    console.error('Error creating task: ' + e.toString());
   }
 }
 
+// ---------------------------------------------------------------------------
+// Post a summary message to Google Chat via webhook
+// ---------------------------------------------------------------------------
 function sendGoogleChatNotification(taskList) {
-  const message = {
-    "text": `📌 *${taskList.length} New Tasks Created*\n${taskList.join('\n')}\n\n🔗 <users/all> <https://tasks.google.com|Open Google Tasks>`
-  };
-  
-  const options = {
-    "method": "post",
-    "contentType": "application/json",
-    "payload": JSON.stringify(message)
-  };
-  
+  const text = `📌 *${taskList.length} New Task${taskList.length > 1 ? 's' : ''} Created*\n`
+             + taskList.join('\n')
+             + '\n\n🔗 <https://tasks.google.com|Open Google Tasks>';
+
   try {
-    UrlFetchApp.fetch(GOOGLE_CHAT_WEBHOOK_URL, options);
+    UrlFetchApp.fetch(GOOGLE_CHAT_WEBHOOK_URL, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({ text })
+    });
   } catch (e) {
-    console.log("Chat Notification Error: " + e.toString());
+    console.error('Chat notification error: ' + e.toString());
   }
 }
 
+// ---------------------------------------------------------------------------
+// SETUP HELPERS — run these once during initial configuration
+// ---------------------------------------------------------------------------
+
+// Step 1 — Print all task lists so you can copy the right TASK_LIST_ID
 function listTaskLists() {
-  const taskLists = Tasks.Tasklists.list();
-  taskLists.items.forEach(list => {
-    console.log('List Name: ' + list.title + ' | ID: ' + list.id);
+  Tasks.Tasklists.list().items.forEach(list => {
+    console.log(`List: "${list.title}" | ID: ${list.id}`);
   });
 }
 
+// Step 2 — Store your personal settings as Script Properties
+//           Edit the values below, then run this function once
 function setupEnvironment() {
-  const scriptProperties = PropertiesService.getScriptProperties();
-  
-  scriptProperties.setProperties({
-    'MY_NAME': 'Your name',
-    'TASK_LIST_ID': '@default',
-    'CHAT_WEBHOOK': 'https://chat.googleapis.com/v1/spaces/...', // Your full URL
-    'MY_CHAT_ID': '123456789' // Your numerical ID for tagging
+  PropertiesService.getScriptProperties().setProperties({
+    'MY_NAME'      : 'Your Name',             // As it appears in meeting notes
+    'TASK_LIST_ID' : '@default',              // Or paste the ID from listTaskLists()
+    'CHAT_WEBHOOK' : 'https://chat.googleapis.com/v1/spaces/SPACE_ID/messages?key=...'
   });
-  
-  console.log("Environment variables set successfully!");
+  console.log('Script Properties saved. Run listTaskLists() to find your Task List ID.');
+}
+
+// Step 3 — Create the hourly trigger automatically (run once; removes any existing trigger first)
+function setupTrigger() {
+  // Remove existing triggers for processMeetingNotes to avoid duplicates
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'processMeetingNotes')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+
+  ScriptApp.newTrigger('processMeetingNotes')
+    .timeBased()
+    .everyHours(1)
+    .create();
+
+  console.log('Hourly trigger created for processMeetingNotes.');
+}
+
+// Run all three setup steps at once (listTaskLists output will help you fill in TASK_LIST_ID)
+function firstTimeSetup() {
+  setupEnvironment();
+  setupTrigger();
+  listTaskLists();
 }
