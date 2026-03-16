@@ -1,5 +1,7 @@
 # Meeting Notes to Google Tasks Automation
 
+![banner](assets/images/banner.png)
+
 Automatically turns Gemini meeting-note emails into Google Tasks and sends a Google Chat notification — no manual copying required.
 
 ## 🚀 Features
